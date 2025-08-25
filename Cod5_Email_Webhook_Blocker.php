@@ -3,14 +3,15 @@
  * Plugin Name: Cod5 Email Webhook Blocker
  * Plugin URI: https://codigo5.com.br
  * Description: Intercepts and blocks ALL outgoing emails from WordPress (wp_mail, PHPMailer, SMTP plugins, sendmail, etc.), forwarding the original payload to a configurable n8n webhook, with resilient logging, rotation, governance checklist, CI/CD guidance, and audit-ready documentation. Designed for compliance, secure staging usage, and zero UI footprint. Compatible WP 5.0+, PHP 7.2+, no external dependencies.
- * Version: 1.3.0
+ * Version: 1.4.0
  * Author: Leandro Bosaipo / Código5 WEB
  * Author URI: https://codigo5.com.br
  * License: GPLv2+ (https://www.gnu.org/licenses/gpl-2.0.html)
  *
  * Changelog:
- * 1.2.0 - Added robust PHPMailer class replacement via serialization hack to enforce blocking. Improved hash deduplication between wp_mail and phpmailer_init. Hardened logging with file locking and rotation.
- * 1.1.0 - Initial production-ready implementation: intercept wp_mail, phpmailer_init, send to webhook, logging, rotation, fail-safe blocking.
+ * 1.4.0 - Fixed webhook duplication issue and user error messages. Improved deduplication logic using request ID and better payload matching. Enhanced PHPMailer interception to ensure WordPress perceives successful email delivery.
+ * 1.3.0 - Added robust PHPMailer class replacement via serialization hack to enforce blocking. Improved hash deduplication between wp_mail and phpmailer_init. Hardened logging with file locking and rotation.
+ * 1.2.0 - Initial production-ready implementation: intercept wp_mail, phpmailer_init, send to webhook, logging, rotation, fail-safe blocking.
  * 1.0.0 - Initial release with wp_mail interception and webhook forwarding.
  *
  * ================================
@@ -160,14 +161,18 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
 
     class Cod5_Email_Webhook_Blocker {
 
-        private static $cod5_last_mail_hash = '';
+        private static $cod5_processed_requests = [];
         private static $initialized = false;
+        private static $request_id = null;
 
         public static function init() {
             if ( self::$initialized ) {
                 return;
             }
             self::$initialized = true;
+
+            // Generate unique request ID for this session
+            self::$request_id = uniqid('cod5_', true);
 
             add_filter( 'wp_mail', [ __CLASS__, 'intercept_wp_mail' ], PHP_INT_MAX );
             add_action( 'phpmailer_init', [ __CLASS__, 'intercept_phpmailer_init' ], 1 );
@@ -198,11 +203,27 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
                 'attachments' => $cod5_attachments,
             ];
 
-            // Deduplicate: store hash so phpmailer_init knows not to double-send
-            self::$cod5_last_mail_hash = sha1( wp_json_encode( $payload ) );
+            // Create unique identifier for this email request
+            $request_key = self::create_request_key($payload);
+            
+            // Check if already processed
+            if (isset(self::$cod5_processed_requests[$request_key])) {
+                self::log_event('DEBUG', 'Duplicate wp_mail request detected, skipping webhook call.', [
+                    'request_key' => $request_key,
+                    'request_id' => self::$request_id
+                ]);
+                return $args;
+            }
+
+            // Mark as processed
+            self::$cod5_processed_requests[$request_key] = [
+                'timestamp' => microtime(true),
+                'source' => 'wp_mail',
+                'request_id' => self::$request_id
+            ];
 
             // Send to webhook
-            $success = self::send_to_webhook( $payload );
+            $success = self::send_to_webhook( $payload, $request_key );
 
             // Log outcome
             $sender = self::extract_from_headers( $cod5_headers );
@@ -211,6 +232,8 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
                 'to' => $recipients,
                 'subject' => $cod5_subject,
                 'from' => $sender,
+                'request_key' => $request_key,
+                'request_id' => self::$request_id
             ];
             if ( $success ) {
                 self::log_event( 'INFO', 'wp_mail intercepted and forwarded to webhook successfully.', $log_context );
@@ -266,28 +289,75 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
                 'attachments' => $attachments,
             ];
         
-            // ✅ Deduplicate: se já foi enviado pelo wp_mail, não repete
-            $current_hash = sha1( wp_json_encode( $payload ) );
-            if ( $current_hash === self::$cod5_last_mail_hash ) {
-                return; // já processado no wp_mail
+            // Create unique identifier for this PHPMailer request
+            $request_key = self::create_request_key($payload);
+            
+            // Check if already processed (either by wp_mail or previous phpmailer_init)
+            if (isset(self::$cod5_processed_requests[$request_key])) {
+                self::log_event('DEBUG', 'Duplicate PHPMailer request detected, skipping webhook call.', [
+                    'request_key' => $request_key,
+                    'request_id' => self::$request_id,
+                    'previous_source' => self::$cod5_processed_requests[$request_key]['source']
+                ]);
+                
+                // Still need to patch the PHPMailer object to block actual sending
+                self::patch_phpmailer_object($phpmailer);
+                return;
             }
+
+            // Mark as processed
+            self::$cod5_processed_requests[$request_key] = [
+                'timestamp' => microtime(true),
+                'source' => 'phpmailer_init',
+                'request_id' => self::$request_id
+            ];
         
-            // Só chega aqui se for realmente diferente
-            $success = self::send_to_webhook( $payload );
+            // Send to webhook only if not duplicate
+            $success = self::send_to_webhook( $payload, $request_key );
             $sender = property_exists( $phpmailer, 'From' ) ? $phpmailer->From : '';
             $log_context = [
                 'to' => $recipients,
                 'subject' => $subject,
                 'from' => $sender,
+                'request_key' => $request_key,
+                'request_id' => self::$request_id
             ];
             if ( $success ) {
                 self::log_event( 'INFO', 'PHPMailer instance intercepted and forwarded to webhook successfully.', $log_context );
             } else {
                 self::log_event( 'ERROR', 'Failed to forward PHPMailer payload to webhook.', $log_context );
             }
-            self::$cod5_last_mail_hash = $current_hash;
         
-            // Replace PHPMailer object class so its send() retorna true (não quebra o usuário)
+            // Always patch the PHPMailer object to block actual sending
+            self::patch_phpmailer_object($phpmailer);
+        }
+
+        /**
+         * Creates a unique key for deduplication based on email content
+         * 
+         * @param array $payload
+         * @return string
+         */
+        private static function create_request_key($payload) {
+            // Normalize the payload for consistent hashing
+            $normalized = [
+                'to' => self::normalize_recipients($payload['to']),
+                'subject' => trim($payload['subject']),
+                'message' => trim($payload['message']),
+                'attachments_count' => is_array($payload['attachments']) ? count($payload['attachments']) : 0
+            ];
+            
+            // Create hash from normalized data
+            return sha1(serialize($normalized));
+        }
+
+        /**
+         * Patches PHPMailer object to ensure send() returns true (success)
+         * 
+         * @param object $phpmailer
+         * @return void
+         */
+        private static function patch_phpmailer_object($phpmailer) {
             if ( self::is_namespaced_phpmailer( $phpmailer ) && class_exists( 'Cod5_Patched_PHPMailer' ) ) {
                 $patched = self::change_object_class( $phpmailer, 'Cod5_Patched_PHPMailer' );
                 if ( is_object( $patched ) ) {
@@ -310,11 +380,23 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
          * Sends payload to configured webhook.
          *
          * @param array $payload
+         * @param string $request_key
          * @return bool Success
          */
-        private static function send_to_webhook( $payload ) {
+        private static function send_to_webhook( $payload, $request_key = '' ) {
             $webhook_url = defined( 'COD5_EMAIL_WEBHOOK_URL' ) ? COD5_EMAIL_WEBHOOK_URL : 'https://criadordigital-n8n-webhook.easypanel.codigo5.com.br/webhook/e72df306-d654-4c91-b310-6ee69ffcdef2';
-            $body = wp_json_encode( $payload );
+            
+            // Add request metadata to payload
+            $enhanced_payload = array_merge($payload, [
+                'cod5_metadata' => [
+                    'request_key' => $request_key,
+                    'request_id' => self::$request_id,
+                    'timestamp' => date('c'),
+                    'source' => 'cod5_email_webhook_blocker'
+                ]
+            ]);
+            
+            $body = wp_json_encode( $enhanced_payload );
 
             $args = [
                 'headers'     => [
@@ -328,7 +410,11 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
 
             $response = wp_remote_post( $webhook_url, $args );
             if ( is_wp_error( $response ) ) {
-                self::log_event( 'ERROR', 'Webhook request failed: ' . $response->get_error_message(), [ 'webhook_url' => $webhook_url ] );
+                self::log_event( 'ERROR', 'Webhook request failed: ' . $response->get_error_message(), [ 
+                    'webhook_url' => $webhook_url,
+                    'request_key' => $request_key,
+                    'request_id' => self::$request_id
+                ] );
                 return false;
             }
 
@@ -338,7 +424,11 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
             }
 
             $body_resp = wp_remote_retrieve_body( $response );
-            self::log_event( 'ERROR', sprintf( 'Webhook returned HTTP %d. Body: %s', $code, substr( $body_resp, 0, 1000 ) ), [ 'webhook_url' => $webhook_url ] );
+            self::log_event( 'ERROR', sprintf( 'Webhook returned HTTP %d. Body: %s', $code, substr( $body_resp, 0, 1000 ) ), [ 
+                'webhook_url' => $webhook_url,
+                'request_key' => $request_key,
+                'request_id' => self::$request_id
+            ] );
             return false;
         }
 
@@ -535,7 +625,7 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
                 eval( '
                     class Cod5_Patched_PHPMailer extends \PHPMailer\PHPMailer\PHPMailer {
                         public function send() {
-                            // Block actual send.
+                            // Block actual send but return true to indicate success to WordPress
                             return true;
                         }
                     }
@@ -546,6 +636,7 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
                 eval( '
                     class Cod5_Patched_PHPMailer_Legacy extends PHPMailer {
                         public function send() {
+                            // Block actual send but return true to indicate success to WordPress
                             return true;
                         }
                     }
