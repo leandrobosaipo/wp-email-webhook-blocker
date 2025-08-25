@@ -3,7 +3,7 @@
  * Plugin Name: Cod5 Email Webhook Blocker
  * Plugin URI: https://codigo5.com.br
  * Description: Intercepts and blocks ALL outgoing emails from WordPress (wp_mail, PHPMailer, SMTP plugins, sendmail, etc.), forwarding the original payload to a configurable n8n webhook, with resilient logging, rotation, governance checklist, CI/CD guidance, and audit-ready documentation. Designed for compliance, secure staging usage, and zero UI footprint. Compatible WP 5.0+, PHP 7.2+, no external dependencies.
- * Version: 1.5.0
+ * Version: 1.6.0
  * Author: Leandro Bosaipo / Código5 WEB
  * Author URI: https://codigo5.com.br
  * License: GPLv2+ (https://www.gnu.org/licenses/gpl-2.0.html)
@@ -189,57 +189,57 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
          */
         public static function intercept_wp_mail( $args ) {
             // Normalize basic structure
-            $cod5_to          = isset( $args['to'] ) ? $args['to'] : '';
-            $cod5_subject     = isset( $args['subject'] ) ? $args['subject'] : '';
-            $cod5_message     = isset( $args['message'] ) ? $args['message'] : '';
-            $cod5_headers     = isset( $args['headers'] ) ? $args['headers'] : '';
-            $cod5_attachments = isset( $args['attachments'] ) ? $args['attachments'] : '';
+            // $cod5_to          = isset( $args['to'] ) ? $args['to'] : '';
+            // $cod5_subject     = isset( $args['subject'] ) ? $args['subject'] : '';
+            // $cod5_message     = isset( $args['message'] ) ? $args['message'] : '';
+            // $cod5_headers     = isset( $args['headers'] ) ? $args['headers'] : '';
+            // $cod5_attachments = isset( $args['attachments'] ) ? $args['attachments'] : '';
 
-            $payload = [
-                'to'          => $cod5_to,
-                'subject'     => $cod5_subject,
-                'message'     => $cod5_message,
-                'headers'     => $cod5_headers,
-                'attachments' => $cod5_attachments,
-            ];
+            // $payload = [
+            //     'to'          => $cod5_to,
+            //     'subject'     => $cod5_subject,
+            //     'message'     => $cod5_message,
+            //     'headers'     => $cod5_headers,
+            //     'attachments' => $cod5_attachments,
+            // ];
 
-            // Create unique identifier for this email request
-            $request_key = self::create_request_key($payload);
+            // // Create unique identifier for this email request
+            // $request_key = self::create_request_key($payload);
             
-            // Check if already processed
-            if (isset(self::$cod5_processed_requests[$request_key])) {
-                self::log_event('DEBUG', 'Duplicate wp_mail request detected, skipping webhook call.', [
-                    'request_key' => $request_key,
-                    'request_id' => self::$request_id
-                ]);
-                return $args;
-            }
+            // // Check if already processed
+            // if (isset(self::$cod5_processed_requests[$request_key])) {
+            //     self::log_event('DEBUG', 'Duplicate wp_mail request detected, skipping webhook call.', [
+            //         'request_key' => $request_key,
+            //         'request_id' => self::$request_id
+            //     ]);
+            //     return $args;
+            // }
 
-            // Mark as processed
-            self::$cod5_processed_requests[$request_key] = [
-                'timestamp' => microtime(true),
-                'source' => 'wp_mail',
-                'request_id' => self::$request_id
-            ];
+            // // Mark as processed
+            // self::$cod5_processed_requests[$request_key] = [
+            //     'timestamp' => microtime(true),
+            //     'source' => 'wp_mail',
+            //     'request_id' => self::$request_id
+            // ];
 
-            // Send to webhook
-            $success = self::send_to_webhook( $payload, $request_key );
+            // // Send to webhook
+            // $success = self::send_to_webhook( $payload, $request_key );
 
-            // Log outcome
-            $sender = self::extract_from_headers( $cod5_headers );
-            $recipients = self::normalize_recipients( $cod5_to );
-            $log_context = [
-                'to' => $recipients,
-                'subject' => $cod5_subject,
-                'from' => $sender,
-                'request_key' => $request_key,
-                'request_id' => self::$request_id
-            ];
-            if ( $success ) {
-                self::log_event( 'INFO', 'wp_mail intercepted and forwarded to webhook successfully.', $log_context );
-            } else {
-                self::log_event( 'ERROR', 'Failed to forward wp_mail payload to webhook.', $log_context );
-            }
+            // // Log outcome
+            // $sender = self::extract_from_headers( $cod5_headers );
+            // $recipients = self::normalize_recipients( $cod5_to );
+            // $log_context = [
+            //     'to' => $recipients,
+            //     'subject' => $cod5_subject,
+            //     'from' => $sender,
+            //     'request_key' => $request_key,
+            //     'request_id' => self::$request_id
+            // ];
+            // if ( $success ) {
+            //     self::log_event( 'INFO', 'wp_mail intercepted and forwarded to webhook successfully.', $log_context );
+            // } else {
+            //     self::log_event( 'ERROR', 'Failed to forward wp_mail payload to webhook.', $log_context );
+            // }
 
             // Always return original args; actual delivery will be blocked by PHPMailer subclass override
             // return $args;
