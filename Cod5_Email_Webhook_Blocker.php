@@ -3,7 +3,7 @@
  * Plugin Name: Cod5 Email Webhook Blocker
  * Plugin URI: https://codigo5.com.br
  * Description: Intercepts and blocks ALL outgoing emails from WordPress (wp_mail, PHPMailer, SMTP plugins, sendmail, etc.), forwarding the original payload to a configurable n8n webhook, with resilient logging, rotation, governance checklist, CI/CD guidance, and audit-ready documentation. Designed for compliance, secure staging usage, and zero UI footprint. Compatible WP 5.0+, PHP 7.2+, no external dependencies.
- * Version: 1.4.0
+ * Version: 1.5.0
  * Author: Leandro Bosaipo / Código5 WEB
  * Author URI: https://codigo5.com.br
  * License: GPLv2+ (https://www.gnu.org/licenses/gpl-2.0.html)
@@ -242,7 +242,10 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
             }
 
             // Always return original args; actual delivery will be blocked by PHPMailer subclass override
-            return $args;
+            // return $args;
+            // ✅ Retornar true para o WordPress entender que o envio foi bem-sucedido
+            return true;
+
         }
 
         /**
