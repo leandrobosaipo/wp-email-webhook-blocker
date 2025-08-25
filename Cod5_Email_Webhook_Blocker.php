@@ -157,6 +157,8 @@ if ( defined( 'COD5_EMAIL_WEBHOOK_ACTIVE_ENV' ) && defined( 'WP_ENV' ) && WP_ENV
     return;
 }
 
+
+
 if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
 
     class Cod5_Email_Webhook_Blocker {
@@ -164,6 +166,8 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
         private static $cod5_processed_requests = [];
         private static $initialized = false;
         private static $request_id = null;
+        // Evita duplicar quando já curto-circuitamos via pre_wp_mail
+        private static $cod5_curto_circuitou = false;
 
         public static function init() {
             if ( self::$initialized ) {
@@ -174,7 +178,10 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
             // Generate unique request ID for this session
             self::$request_id = uniqid('cod5_', true);
 
-            add_filter( 'wp_mail', [ __CLASS__, 'intercept_wp_mail' ], PHP_INT_MAX );
+            //add_filter( 'wp_mail', [ __CLASS__, 'intercept_wp_mail' ], PHP_INT_MAX );
+            // Curto-circuita ANTES do WordPress tentar enviar e-mail
+            add_filter( 'pre_wp_mail', [ __CLASS__, 'cod5_short_circuit_wp_mail' ], 999, 2 );
+
             add_action( 'phpmailer_init', [ __CLASS__, 'intercept_phpmailer_init' ], 1 );
 
             // Ensure PHPMailer send is patched early if possible (namespaced & legacy)
@@ -187,65 +194,102 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
          * @param array $args Original wp_mail args.
          * @return array Unmodified args (blocking happens via PHPMailer patch).
          */
-        public static function intercept_wp_mail( $args ) {
-            // Normalize basic structure
-            // $cod5_to          = isset( $args['to'] ) ? $args['to'] : '';
-            // $cod5_subject     = isset( $args['subject'] ) ? $args['subject'] : '';
-            // $cod5_message     = isset( $args['message'] ) ? $args['message'] : '';
-            // $cod5_headers     = isset( $args['headers'] ) ? $args['headers'] : '';
-            // $cod5_attachments = isset( $args['attachments'] ) ? $args['attachments'] : '';
+        // public static function intercept_wp_mail( $args ) {
+        //     // Normalize basic structure
+        //     // $cod5_to          = isset( $args['to'] ) ? $args['to'] : '';
+        //     // $cod5_subject     = isset( $args['subject'] ) ? $args['subject'] : '';
+        //     // $cod5_message     = isset( $args['message'] ) ? $args['message'] : '';
+        //     // $cod5_headers     = isset( $args['headers'] ) ? $args['headers'] : '';
+        //     // $cod5_attachments = isset( $args['attachments'] ) ? $args['attachments'] : '';
 
-            // $payload = [
-            //     'to'          => $cod5_to,
-            //     'subject'     => $cod5_subject,
-            //     'message'     => $cod5_message,
-            //     'headers'     => $cod5_headers,
-            //     'attachments' => $cod5_attachments,
-            // ];
+        //     // $payload = [
+        //     //     'to'          => $cod5_to,
+        //     //     'subject'     => $cod5_subject,
+        //     //     'message'     => $cod5_message,
+        //     //     'headers'     => $cod5_headers,
+        //     //     'attachments' => $cod5_attachments,
+        //     // ];
 
-            // // Create unique identifier for this email request
-            // $request_key = self::create_request_key($payload);
+        //     // // Create unique identifier for this email request
+        //     // $request_key = self::create_request_key($payload);
             
-            // // Check if already processed
-            // if (isset(self::$cod5_processed_requests[$request_key])) {
-            //     self::log_event('DEBUG', 'Duplicate wp_mail request detected, skipping webhook call.', [
-            //         'request_key' => $request_key,
-            //         'request_id' => self::$request_id
-            //     ]);
-            //     return $args;
-            // }
+        //     // // Check if already processed
+        //     // if (isset(self::$cod5_processed_requests[$request_key])) {
+        //     //     self::log_event('DEBUG', 'Duplicate wp_mail request detected, skipping webhook call.', [
+        //     //         'request_key' => $request_key,
+        //     //         'request_id' => self::$request_id
+        //     //     ]);
+        //     //     return $args;
+        //     // }
 
-            // // Mark as processed
-            // self::$cod5_processed_requests[$request_key] = [
-            //     'timestamp' => microtime(true),
-            //     'source' => 'wp_mail',
-            //     'request_id' => self::$request_id
-            // ];
+        //     // // Mark as processed
+        //     // self::$cod5_processed_requests[$request_key] = [
+        //     //     'timestamp' => microtime(true),
+        //     //     'source' => 'wp_mail',
+        //     //     'request_id' => self::$request_id
+        //     // ];
 
-            // // Send to webhook
-            // $success = self::send_to_webhook( $payload, $request_key );
+        //     // // Send to webhook
+        //     // $success = self::send_to_webhook( $payload, $request_key );
 
-            // // Log outcome
-            // $sender = self::extract_from_headers( $cod5_headers );
-            // $recipients = self::normalize_recipients( $cod5_to );
-            // $log_context = [
-            //     'to' => $recipients,
-            //     'subject' => $cod5_subject,
-            //     'from' => $sender,
-            //     'request_key' => $request_key,
-            //     'request_id' => self::$request_id
-            // ];
-            // if ( $success ) {
-            //     self::log_event( 'INFO', 'wp_mail intercepted and forwarded to webhook successfully.', $log_context );
-            // } else {
-            //     self::log_event( 'ERROR', 'Failed to forward wp_mail payload to webhook.', $log_context );
-            // }
+        //     // // Log outcome
+        //     // $sender = self::extract_from_headers( $cod5_headers );
+        //     // $recipients = self::normalize_recipients( $cod5_to );
+        //     // $log_context = [
+        //     //     'to' => $recipients,
+        //     //     'subject' => $cod5_subject,
+        //     //     'from' => $sender,
+        //     //     'request_key' => $request_key,
+        //     //     'request_id' => self::$request_id
+        //     // ];
+        //     // if ( $success ) {
+        //     //     self::log_event( 'INFO', 'wp_mail intercepted and forwarded to webhook successfully.', $log_context );
+        //     // } else {
+        //     //     self::log_event( 'ERROR', 'Failed to forward wp_mail payload to webhook.', $log_context );
+        //     // }
 
-            // Always return original args; actual delivery will be blocked by PHPMailer subclass override
-            // return $args;
-            // ✅ Retornar true para o WordPress entender que o envio foi bem-sucedido
+        //     // Always return original args; actual delivery will be blocked by PHPMailer subclass override
+        //     // return $args;
+        //     // ✅ Retornar true para o WordPress entender que o envio foi bem-sucedido
+        //     return true;
+
+        // }
+
+        /**
+         * Curto-circuita o wp_mail: envia ao webhook e devolve sucesso para o WordPress.
+         * Isso faz o Elementor (e qualquer formulário) receber "success" no AJAX.
+         *
+         * @param mixed $cod5Retorno Valor de retorno original (normalmente null)
+         * @param array $cod5Atributos ['to','subject','message','headers','attachments']
+         * @return bool|WP_Error true para sucesso; WP_Error/false se quiser sinalizar falha
+         */
+        public static function cod5_short_circuit_wp_mail( $cod5Retorno, $cod5Atributos ) {
+            $cod5Payload = [
+                'to'          => (array)($cod5Atributos['to'] ?? []),
+                'subject'     => (string)($cod5Atributos['subject'] ?? ''),
+                'message'     => (string)($cod5Atributos['message'] ?? ''),
+                'headers'     => $cod5Atributos['headers'] ?? [],
+                'attachments' => $cod5Atributos['attachments'] ?? [],
+                // ✅ opcional, mas útil para você depurar a origem
+                'source'      => 'pre_wp_mail',
+            ];
+
+            // Envia para o webhook (use sua função já existente)
+            $cod5Ok = self::send_to_webhook( $cod5Payload );
+
+            // Marca hash/flag para evitar repetir no phpmailer_init
+            self::$cod5_last_mail_hash   = sha1( wp_json_encode( $cod5Payload ) );
+            self::$cod5_curto_circuitou  = true;
+
+            // Log opcional
+            self::log_event( $cod5Ok ? 'INFO' : 'ERROR',
+                $cod5Ok ? 'Webhook OK via pre_wp_mail.' : 'Falha ao enviar webhook via pre_wp_mail.',
+                ['to' => $cod5Payload['to'], 'subject' => $cod5Payload['subject']]
+            );
+
+            // 💡 ESSENCIAL: retornar TRUE faz o wp_mail() devolver TRUE.
+            // O Elementor então responde com {"success":true,"data":{"message":"Your submission was successful.","data":[]}}
             return true;
-
         }
 
         /**
@@ -255,6 +299,12 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
          * @return void
          */
         public static function intercept_phpmailer_init( $phpmailer ) {
+
+            // Se já curto-circuitamos no pre_wp_mail, não faça mais nada aqui.
+            if ( self::$cod5_curto_circuitou ) {
+                return;
+            }
+
             // Build approximate equivalent of wp_mail args
             $to_list = self::cod5_phpmailer_get_addresses( $phpmailer, 'to' );
             $cc_list = self::cod5_phpmailer_get_addresses( $phpmailer, 'cc' );
