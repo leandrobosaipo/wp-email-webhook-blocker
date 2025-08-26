@@ -3,7 +3,7 @@
  * Plugin Name: Cod5 Email Webhook Blocker
  * Plugin URI: https://codigo5.com.br
  * Description: Intercepts and blocks ALL outgoing emails from WordPress (wp_mail, PHPMailer, SMTP plugins, sendmail, etc.), forwarding the original payload to a configurable n8n webhook, with resilient logging, rotation, governance checklist, CI/CD guidance, and audit-ready documentation. Designed for compliance, secure staging usage, and zero UI footprint. Compatible WP 5.0+, PHP 7.2+, no external dependencies.
- * Version: 1.4.3
+ * Version: 1.4.4
  * Author: Leandro Bosaipo / Código5 WEB
  * Author URI: https://codigo5.com.br
  * License: GPLv2+ (https://www.gnu.org/licenses/gpl-2.0.html)
@@ -185,9 +185,41 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
             remove_filter( 'wp_mail', [ __CLASS__, 'intercept_wp_mail' ], 999 );
             remove_filter( 'wp_mail', [ __CLASS__, 'intercept_wp_mail' ], 10 );   // caso tenha usado outra prioridade
 
+            // ⚡ Dispara antes do Elementor processar e garante o JSON de sucesso
+            add_action('wp_ajax_nopriv_elementor_pro_forms_send_form', [ __CLASS__, 'cod5_forcar_ajax_sucesso_elementor' ], 0);
+            add_action('wp_ajax_elementor_pro_forms_send_form',       [ __CLASS__, 'cod5_forcar_ajax_sucesso_elementor' ], 0);
+            
+
 
             // Ensure PHPMailer send is patched early if possible (namespaced & legacy)
             self::prepare_phPMailer_patch_classes();
+        }
+
+        /**
+         * Força o retorno Ajax de sucesso do Elementor:
+         * {"success":true,"data":{"message":"Your submission was successful.","data":[]}}
+         * Só roda na ação elementor_pro_forms_send_form.
+         */
+        public static function cod5_forcar_ajax_sucesso_elementor() {
+            // Evita executar duas vezes no mesmo request
+            static $cod5JaEnviou = false;
+            if ($cod5JaEnviou) {
+                return;
+            }
+            $cod5JaEnviou = true;
+
+            // Mensagem exatamente como o front espera
+            $cod5Mensagem = 'Your submission was successful.';
+
+            // Se quiser personalizar via filtro:
+            // add_filter('cod5/elementor/success_message', fn() => 'Obrigado! Recebemos seus dados.');
+            $cod5Mensagem = apply_filters('cod5/elementor/success_message', $cod5Mensagem);
+
+            // IMPORTANTE: finaliza a requisição Ajax com sucesso
+            wp_send_json_success([
+                'message' => $cod5Mensagem,
+                'data'    => [],
+            ]);
         }
 
         /**
