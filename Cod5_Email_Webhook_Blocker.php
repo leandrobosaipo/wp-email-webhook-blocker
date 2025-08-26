@@ -3,7 +3,7 @@
  * Plugin Name: Cod5 Email Webhook Blocker
  * Plugin URI: https://codigo5.com.br
  * Description: Intercepts and blocks ALL outgoing emails from WordPress (wp_mail, PHPMailer, SMTP plugins, sendmail, etc.), forwarding the original payload to a configurable n8n webhook, with resilient logging, rotation, governance checklist, CI/CD guidance, and audit-ready documentation. Designed for compliance, secure staging usage, and zero UI footprint. Compatible WP 5.0+, PHP 7.2+, no external dependencies.
- * Version: 1.6.0
+ * Version: 1.4.3
  * Author: Leandro Bosaipo / Código5 WEB
  * Author URI: https://codigo5.com.br
  * License: GPLv2+ (https://www.gnu.org/licenses/gpl-2.0.html)
@@ -178,16 +178,60 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
             // Generate unique request ID for this session
             self::$request_id = uniqid('cod5_', true);
 
-            //add_filter( 'wp_mail', [ __CLASS__, 'intercept_wp_mail' ], PHP_INT_MAX );
-            // Curto-circuita ANTES do WordPress tentar enviar e-mail
-            add_filter( 'pre_wp_mail', [ __CLASS__, 'cod5_short_circuit_wp_mail' ], 999, 2 );
+            // Curto-circuita o envio ANTES do WP tentar enviar e-mail
+            add_filter( 'pre_wp_mail', [ __CLASS__, 'cod5_pre_wp_mail' ], 10, 2 );
 
-            add_action( 'phpmailer_init', [ __CLASS__, 'intercept_phpmailer_init' ], 1 );
+            // Garante que o filtro antigo não fique ativo (evita quebrar o retorno do wp_mail)
+            remove_filter( 'wp_mail', [ __CLASS__, 'intercept_wp_mail' ], 999 );
+            remove_filter( 'wp_mail', [ __CLASS__, 'intercept_wp_mail' ], 10 );   // caso tenha usado outra prioridade
+
 
             // Ensure PHPMailer send is patched early if possible (namespaced & legacy)
             self::prepare_phPMailer_patch_classes();
         }
 
+        /**
+         * Curto-circuita o wp_mail: envia ao webhook e devolve sucesso para o WP/Elementor.
+         *
+         * @param mixed $cod5Retorno Valor de retorno original (normalmente null)
+         * @param array $cod5Atributos ['to','subject','message','headers','attachments']
+         * @return bool|WP_Error true para sucesso; WP_Error/false para sinalizar falha
+         */
+        public static function cod5_pre_wp_mail( $cod5Retorno, $cod5Atributos ) {
+            $cod5Payload = [
+                'to'          => (array)($cod5Atributos['to'] ?? []),
+                'subject'     => (string)($cod5Atributos['subject'] ?? ''),
+                'message'     => (string)($cod5Atributos['message'] ?? ''),
+                'headers'     => $cod5Atributos['headers'] ?? [],
+                'attachments' => $cod5Atributos['attachments'] ?? [],
+                // ajuda depurar a origem
+                'source'      => 'pre_wp_mail',
+            ];
+
+            // Envia para o webhook (reusa sua função existente)
+            $cod5Ok = self::send_to_webhook( $cod5Payload );
+
+            // Marca hash/flag para evitar duplicar em phpmailer_init
+            self::$cod5_last_mail_hash  = sha1( wp_json_encode( $cod5Payload ) );
+            self::$cod5_curto_circuitou = true;
+
+            // Log (opcional)
+            self::log_event(
+                $cod5Ok ? 'INFO' : 'ERROR',
+                $cod5Ok ? 'Webhook OK via pre_wp_mail.' : 'Falha ao enviar webhook via pre_wp_mail.',
+                [ 'to' => $cod5Payload['to'], 'subject' => $cod5Payload['subject'] ]
+            );
+
+            // ⚠️ ESSENCIAL: retornar TRUE faz o wp_mail() retornar TRUE.
+            // O Elementor então responde com: {"success":true,"data":{"message":"Your submission was successful.","data":[]}}
+            return true;
+        }
+        
+
+        public static function intercept_wp_mail( $args ) {
+            return $args; // seguro: não altera o contrato do filtro 'wp_mail'
+        }
+        
         /**
          * Intercepts wp_mail payload, sends to webhook, logs, and ensures eventual blocking.
          *
@@ -299,6 +343,11 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
          * @return void
          */
         public static function intercept_phpmailer_init( $phpmailer ) {
+
+            // Se já curto-circuitamos via pre_wp_mail, não faça mais nada aqui.
+            if ( isset(self::$cod5_curto_circuitou) && self::$cod5_curto_circuitou === true ) {
+                return;
+            }            
 
             // Se já curto-circuitamos no pre_wp_mail, não faça mais nada aqui.
             if ( self::$cod5_curto_circuitou ) {
