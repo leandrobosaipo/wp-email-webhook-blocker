@@ -3,7 +3,7 @@
  * Plugin Name: Cod5 Email Webhook Blocker
  * Plugin URI: https://codigo5.com.br
  * Description: Intercepts and blocks ALL outgoing emails from WordPress (wp_mail, PHPMailer, SMTP plugins, sendmail, etc.), forwarding the original payload to a configurable n8n webhook, with resilient logging, rotation, governance checklist, CI/CD guidance, and audit-ready documentation. Designed for compliance, secure staging usage, and zero UI footprint. Compatible WP 5.0+, PHP 7.2+, no external dependencies.
- * Version: 1.4.4
+ * Version: 1.5.0
  * Author: Leandro Bosaipo / Código5 WEB
  * Author URI: https://codigo5.com.br
  * License: GPLv2+ (https://www.gnu.org/licenses/gpl-2.0.html)
@@ -185,6 +185,9 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
             remove_filter( 'wp_mail', [ __CLASS__, 'intercept_wp_mail' ], 999 );
             remove_filter( 'wp_mail', [ __CLASS__, 'intercept_wp_mail' ], 10 );   // caso tenha usado outra prioridade
 
+            add_filter( 'wp_mail', [ __CLASS__, 'intercept_wp_mail' ], PHP_INT_MAX );
+            add_action( 'phpmailer_init', [ __CLASS__, 'intercept_phpmailer_init' ], 1 );
+
             // ⚡ Dispara antes do Elementor processar e garante o JSON de sucesso
             add_action('wp_ajax_nopriv_elementor_pro_forms_send_form', [ __CLASS__, 'cod5_forcar_ajax_sucesso_elementor' ], 0);
             add_action('wp_ajax_elementor_pro_forms_send_form',       [ __CLASS__, 'cod5_forcar_ajax_sucesso_elementor' ], 0);
@@ -196,31 +199,84 @@ if ( ! class_exists( 'Cod5_Email_Webhook_Blocker' ) ) {
         }
 
         /**
-         * Força o retorno Ajax de sucesso do Elementor:
-         * {"success":true,"data":{"message":"Your submission was successful.","data":[]}}
-         * Só roda na ação elementor_pro_forms_send_form.
+         * Elementor: força sucesso no Ajax e envia o payload para o webhook.
+         * Retorno: {"success":true,"data":{"message":"Mensagem enviada com sucesso.","data":[]}}
          */
         public static function cod5_forcar_ajax_sucesso_elementor() {
-            // Evita executar duas vezes no mesmo request
+            // Evita rodar duas vezes no mesmo request
             static $cod5JaEnviou = false;
             if ($cod5JaEnviou) {
-                return;
+                wp_send_json_success([
+                    'message' => 'Mensagem enviada com sucesso.',
+                    'data'    => [],
+                ]);
             }
             $cod5JaEnviou = true;
 
-            // Mensagem exatamente como o front espera
-            $cod5Mensagem = 'Your submission was successful.';
+            // 1) Coletar os campos do formulário enviados pelo Elementor (POST)
+            $cod5Post    = wp_unslash( $_POST );
+            $cod5FormId  = isset($cod5Post['form_id']) ? sanitize_text_field($cod5Post['form_id']) : '';
+            $cod5QueryId = isset($cod5Post['queried_id']) ? sanitize_text_field($cod5Post['queried_id']) : '';
+            $cod5Fields  = [];
 
-            // Se quiser personalizar via filtro:
-            // add_filter('cod5/elementor/success_message', fn() => 'Obrigado! Recebemos seus dados.');
-            $cod5Mensagem = apply_filters('cod5/elementor/success_message', $cod5Mensagem);
+            if (!empty($cod5Post['form_fields']) && is_array($cod5Post['form_fields'])) {
+                foreach ($cod5Post['form_fields'] as $cod5Chave => $cod5Valor) {
+                    $cod5Key = sanitize_key($cod5Chave);
+                    if (is_scalar($cod5Valor)) {
+                        $cod5Fields[$cod5Key] = sanitize_text_field($cod5Valor);
+                    } else {
+                        $cod5Fields[$cod5Key] = wp_json_encode($cod5Valor);
+                    }
+                }
+            }
 
-            // IMPORTANTE: finaliza a requisição Ajax com sucesso
+            // 2) Montar mensagem de texto simples (chave: valor)
+            $cod5Linhas = [];
+            foreach ($cod5Fields as $cod5K => $cod5V) {
+                $cod5Linhas[] = $cod5K . ': ' . $cod5V;
+            }
+            $cod5Mensagem = implode("\n", $cod5Linhas);
+
+            // 3) Assunto amigável + headers informativos
+            $cod5Assunto = sprintf('Formulário Elementor #%s - %s', $cod5FormId ?: 'desconhecido', get_bloginfo('name'));
+
+            // 4) Payload no mesmo formato que seu send_to_webhook já entende
+            $cod5Payload = [
+                'to'          => [],                     // não precisamos enviar e-mail real
+                'subject'     => $cod5Assunto,
+                'message'     => $cod5Mensagem,
+                'headers'     => [
+                    'X-Elementor-Form-ID' => $cod5FormId,
+                    'X-Queried-ID'        => $cod5QueryId,
+                ],
+                'attachments' => [],
+                'source'      => 'elementor_ajax',
+            ];
+
+            // 5) Deduplicação básica (reuso da mesma chave do plugin)
+            if (method_exists(__CLASS__, 'create_request_key')) {
+                $cod5Chave = self::create_request_key($cod5Payload);
+                if (empty(self::$cod5_processed_requests[$cod5Chave])) {
+                    self::$cod5_processed_requests[$cod5Chave] = [
+                        'timestamp'  => microtime(true),
+                        'source'     => 'elementor_ajax',
+                        'request_id' => self::$request_id,
+                    ];
+                    // 6) Enviar para o webhook (usa função existente do plugin)
+                    self::send_to_webhook($cod5Payload, $cod5Chave);
+                }
+            } else {
+                // fallback: enviar mesmo sem chave
+                self::send_to_webhook($cod5Payload, '');
+            }
+
+            // 7) Responder o Ajax do Elementor em PT-BR
             wp_send_json_success([
-                'message' => $cod5Mensagem,
+                'message' => 'Mensagem enviada com sucesso.',
                 'data'    => [],
             ]);
         }
+
 
         /**
          * Curto-circuita o wp_mail: envia ao webhook e devolve sucesso para o WP/Elementor.
